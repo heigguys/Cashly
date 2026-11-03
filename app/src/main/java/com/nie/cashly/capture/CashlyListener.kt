@@ -46,10 +46,7 @@ class CashlyListener : NotificationListenerService() {
         val body = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString().orEmpty()
         val text = "$title\n$body"
         val wechat = sbn.packageName == "com.tencent.mm"
-        // WeChat ordinary conversations are not transaction templates even if a contact mentions payment.
-        val trustedTitle = if (wechat) title in listOf("微信支付", "微信收款助手", "微信支付助手")
-            else title in listOf("支付宝", "支付成功", "收款到账", "到账提醒", "退款到账", "交易提醒")
-        val parsed = if (trustedTitle) (if (wechat) WeChatParser() else AlipayParser()).parse(text) else null
+        val parsed = parsePaymentNotification(sbn.packageName, title, body)
         repository.captureNotification(sbn.key, if (wechat) "微信" else "支付宝", text, sbn.postTime, parsed)
     }
     override fun onDestroy() { connectionState.value = false; queue.close(); scope.cancel(); super.onDestroy() }

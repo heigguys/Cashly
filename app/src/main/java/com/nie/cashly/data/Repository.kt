@@ -14,7 +14,16 @@ class Repository(val context: Context, val db: CashlyDatabase = CashlyDatabase.g
     val settings = context.cashlySettings.data.map { Settings(it[stringPreferencesKey("theme")] ?: "系统", it[longPreferencesKey("last")] ?: 0L, it[booleanPreferencesKey("connected")] ?: false) }
     suspend fun theme(value: String) { context.cashlySettings.edit { it[stringPreferencesKey("theme")] = value } }
     suspend fun connection(connected: Boolean) { context.cashlySettings.edit { it[booleanPreferencesKey("connected")] = connected } }
-    suspend fun init() { db.withTransaction { if (dao.categories().isEmpty()) defaultCategories.forEach { dao.category(Category(it)) } }; prune() }
+    suspend fun init() {
+        db.withTransaction {
+            if (dao.categories().isEmpty()) defaultCategories.forEach { dao.category(Category(it)) }
+            // Upgrade existing refund records without changing IDs, sources, amounts or user notes.
+            dao.entries().filter { it.kind == Kind.REFUND && !it.note.contains("退款") }.forEach {
+                dao.update(it.copy(note = refundNote(it.kind, it.note)))
+            }
+        }
+        prune()
+    }
     private suspend fun classify(text: String): String = categoryFor(text).takeIf { candidate -> dao.categories().any { it.name == candidate } } ?: "其他"
     suspend fun prune() = dao.prune(System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000)
     suspend fun captureNotification(osKey: String, platform: String, text: String, time: Long, parsed: Parsed?) {
@@ -37,7 +46,8 @@ class Repository(val context: Context, val db: CashlyDatabase = CashlyDatabase.g
                 val existing = parsed.order?.let { dao.byOrder(platform, it) }
                 val entry = existing ?: Entry(amount = parsed.amount!!, kind = parsed.kind!!, platform = platform, time = time,
                     party = parsed.party, orderId = parsed.order, category = classify(parsed.party), timeEstimated = true)
-                if (existing == null) dao.insert(entry)
+                if (existing == null) dao.insert(entry.copy(note = refundNote(entry.kind, entry.note)))
+                else if (existing.kind == Kind.REFUND && !existing.note.contains("退款")) dao.update(existing.copy(note = refundNote(existing.kind, existing.note)))
                 dao.source(Source(key, entry.id, "通知 · ${parsed.evidence}")); dao.resolve(key)
             }
         }
@@ -45,7 +55,8 @@ class Repository(val context: Context, val db: CashlyDatabase = CashlyDatabase.g
     suspend fun save(entry: Entry, existing: Boolean, eventKey: String? = null) = db.withTransaction {
         require(entry.amount > 0 && entry.category.isNotBlank()) { "金额和分类不能为空" }
         require(dao.categories().any { it.name == entry.category }) { "分类不存在" }
-        if (existing) dao.update(entry.copy(updated = System.currentTimeMillis())) else dao.insert(entry)
+        val normalized = entry.copy(note = refundNote(entry.kind, entry.note))
+        if (existing) dao.update(normalized.copy(updated = System.currentTimeMillis())) else dao.insert(normalized)
         if (eventKey != null) { dao.source(Source(eventKey, entry.id, "通知 · 用户确认")); dao.resolve(eventKey) }
         else if (!existing) dao.source(Source("manual:${entry.id}", entry.id, "手动记录"))
     }
@@ -84,9 +95,9 @@ class Repository(val context: Context, val db: CashlyDatabase = CashlyDatabase.g
             val existing = row.order?.let { dao.byOrder(row.platform, it) } ?: linkedId?.let { id -> dao.entries().find { it.id == id } }
             val entry = existing ?: Entry(amount = row.amount, kind = row.kind, platform = row.platform, time = row.time,
                 category = classify(row.party + row.note), party = row.party, note = row.note, orderId = row.order)
-            if (existing == null) dao.insert(entry) else {
+            if (existing == null) dao.insert(entry.copy(note = refundNote(entry.kind, entry.note))) else {
                 require(existing.amount == row.amount && existing.kind == row.kind && existing.platform == row.platform) { "交易号对应的金额或类型不一致，已取消导入" }
-                dao.update(existing.copy(orderId = existing.orderId ?: row.order, party = existing.party.ifBlank { row.party },
+                dao.update(existing.copy(orderId = existing.orderId ?: row.order, party = existing.party.ifBlank { row.party }, note = refundNote(existing.kind, existing.note),
                     time = if (existing.timeEstimated) row.time else existing.time, timeEstimated = false, updated = System.currentTimeMillis()))
             }
             dao.source(Source(row.sourceKey, entry.id, "${row.platform}账单导入"))

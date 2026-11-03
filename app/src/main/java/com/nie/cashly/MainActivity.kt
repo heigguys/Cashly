@@ -152,7 +152,7 @@ private fun CashlyContent(vm: CashlyViewModel) {
                 } }
                 composable("账单") {
                     var query by remember { mutableStateOf("") }; var platform by remember { mutableStateOf("全部") }; var kind by remember { mutableStateOf("全部") }
-                    val filtered = monthRows.filter { (platform == "全部" || it.platform == platform) && (kind == "全部" || it.kind.label == kind) && (categoryFilter == "全部" || it.category == categoryFilter) && (it.party + it.note).contains(query, ignoreCase = true) }
+                    val filtered = monthRows.filter { (platform == "全部" || it.platform == platform) && (kind == "全部" || it.kind.label == kind || (kind == "收入" && it.kind.isIncome)) && (categoryFilter == "全部" || it.category == categoryFilter) && (it.party + it.note).contains(query, ignoreCase = true) }
                     Page {
                         item { MonthSelector(month) { month = it } }
                         item { OutlinedTextField(query, { query = it }, label = { Text("搜索交易对象、备注") }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, modifier = Modifier.fillMaxWidth(), singleLine = true) }
@@ -165,14 +165,14 @@ private fun CashlyContent(vm: CashlyViewModel) {
                 }
                 composable("统计") { Page {
                     item { MonthSelector(month) { month = it } }; item { Summary(monthRows) }
-                    item { SectionTitle("支出分类", "退款抵减支出") }
-                    val spending = monthRows.filter { it.kind == Kind.EXPENSE || it.kind == Kind.REFUND }.groupBy { it.category }.mapValues { (_, rows) -> rows.sumOf { if (it.kind == Kind.REFUND) -it.amount else it.amount } }.toList().sortedByDescending { it.second }
+                    item { SectionTitle("支出分类", "退款计入收入") }
+                    val spending = monthRows.filter { it.kind == Kind.EXPENSE }.groupBy { it.category }.mapValues { (_, rows) -> rows.sumOf { it.amount } }.toList().sortedByDescending { it.second }
                     if (spending.isEmpty()) item { EmptyState("还没有统计数据", "记下第一笔支出后，就能看到分类分布。") }
                     items(spending) { (category, value) -> Panel(onClick = { categoryFilter = category; nav.navigate("账单") { launchSingleTop = true } }) {
                         SectionTitle(category, "¥${money(value)}")
                         LinearProgressIndicator(progress = { (value.coerceAtLeast(0).toFloat() / spending.sumOf { it.second.coerceAtLeast(0) }.coerceAtLeast(1)).coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                     } }
-                    item { SectionTitle("每日趋势", "收入 / 净支出") }
+                    item { SectionTitle("每日趋势", "收入 / 支出") }
                     item { DailyChart(monthRows, month) }
                 } }
                 composable("我的") { Page {
@@ -220,7 +220,7 @@ private fun CashlyContent(vm: CashlyViewModel) {
 @Composable private fun Summary(rows: List<Entry>) {
     val total = totals(rows.map { it.kind to it.amount })
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer), shape = RoundedCornerShape(26.dp)) { Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("本月净支出", style = MaterialTheme.typography.labelLarge)
+        Text("本月支出", style = MaterialTheme.typography.labelLarge)
         Text("¥ ${money(total.expense)}", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
         HorizontalDivider(); Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Column { Text("收入 ＋", style = MaterialTheme.typography.labelMedium); Text("¥ ${money(total.income)}") }; Column { Text("结余", style = MaterialTheme.typography.labelMedium); Text("¥ ${money(total.balance)}") } }
     } }
@@ -231,6 +231,7 @@ private fun CashlyContent(vm: CashlyViewModel) {
         Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) { Text(entry.party.ifBlank { entry.category }, fontWeight = FontWeight.SemiBold); Text("${entry.platform} · ${entry.category} · ${entry.kind.label}", style = MaterialTheme.typography.labelSmall) }
         Text((when (entry.kind) { Kind.INCOME, Kind.REFUND -> "+"; Kind.EXPENSE -> "−"; Kind.TRANSFER -> "↔" }) + money(entry.amount), fontWeight = FontWeight.Bold)
     }
+    if (entry.note.isNotBlank()) Text(entry.note, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2)
 } }
 @Composable private fun Choices(values: List<String>, selected: String, select: (String) -> Unit) { Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) { values.forEach { FilterChip(selected = it == selected, onClick = { select(it) }, label = { Text(it) }) } } }
 @Composable private fun Selector(value: String, values: List<String>, select: (String) -> Unit, modifier: Modifier = Modifier) { var expanded by remember { mutableStateOf(false) }; Box(modifier) { OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) { Text(value, maxLines = 1) }; DropdownMenu(expanded, { expanded = false }) { values.distinct().forEach { item -> DropdownMenuItem(text = { Text(item) }, onClick = { select(item); expanded = false }) } } } }
@@ -240,7 +241,7 @@ private fun CashlyContent(vm: CashlyViewModel) {
     val max = days.maxOfOrNull { maxOf(it.income, kotlin.math.abs(it.expense)) }?.coerceAtLeast(1) ?: 1L
     val incomeColor = MaterialTheme.colorScheme.primary; val expenseColor = MaterialTheme.colorScheme.tertiary
     Panel {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { Text("● 收入", color = incomeColor); Text("● 净支出", color = expenseColor) }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { Text("● 收入", color = incomeColor); Text("● 支出", color = expenseColor) }
         Canvas(Modifier.fillMaxWidth().height(140.dp).semanticsChart()) {
             val step = size.width / days.size; val baseline = size.height * .8f
             drawLine(Color.Gray, androidx.compose.ui.geometry.Offset(0f, baseline), androidx.compose.ui.geometry.Offset(size.width, baseline))
@@ -250,13 +251,13 @@ private fun CashlyContent(vm: CashlyViewModel) {
                 drawLine(expenseColor, androidx.compose.ui.geometry.Offset(x + step * .7f, baseline), androidx.compose.ui.geometry.Offset(x + step * .7f, baseline - b.coerceAtLeast(-size.height * .2f)), step * .28f)
             }
         }
-        Text("1 日 → ${month.lengthOfMonth()} 日 · 退款可能使净支出低于零", style = MaterialTheme.typography.labelSmall)
+        Text("1 日 → ${month.lengthOfMonth()} 日 · 收入含退款", style = MaterialTheme.typography.labelSmall)
         var day by remember(month) { mutableStateOf("1") }
         Selector("$day 日", (1..month.lengthOfMonth()).map { "$it 日" }, { day = it.substringBefore(" ") })
-        val total = days[day.toInt() - 1]; Text("收入 ¥${money(total.income)} · 净支出 ¥${money(total.expense)}")
+        val total = days[day.toInt() - 1]; Text("收入 ¥${money(total.income)} · 支出 ¥${money(total.expense)}")
     }
 }
-private fun Modifier.semanticsChart(): Modifier = semantics { contentDescription = "每日收入和净支出趋势图，下方可选择日期查看具体数值" }
+private fun Modifier.semanticsChart(): Modifier = semantics { contentDescription = "每日收入和支出趋势图，下方可选择日期查看具体数值" }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -268,6 +269,7 @@ private fun EntryEditor(vm: CashlyViewModel, original: Entry?, event: Event?, ca
     var time by remember { mutableStateOf(formatTime(original?.time ?: event?.received ?: System.currentTimeMillis())) }
     var party by remember { mutableStateOf(original?.party ?: event?.party ?: "") }
     var note by remember { mutableStateOf(original?.note ?: "") }
+    LaunchedEffect(kind) { note = refundNote(kind, note) }
     var error by remember { mutableStateOf<String?>(null) }; var deleteConfirm by remember { mutableStateOf(false) }
     var sources by remember { mutableStateOf<List<Source>>(emptyList()) }
     LaunchedEffect(original?.id) { if (original != null) sources = withContext(Dispatchers.IO) { vm.repo.dao.sources().filter { it.entryId == original.id } } }
@@ -280,7 +282,7 @@ private fun EntryEditor(vm: CashlyViewModel, original: Entry?, event: Event?, ca
             OutlinedTextField(time, { time = it }, label = { Text("时间 yyyy-MM-dd HH:mm:ss") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             OutlinedTextField(party, { party = it }, label = { Text("交易对象（可选）") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             OutlinedTextField(note, { note = it }, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth(), maxLines = 3)
-            if (kind == Kind.REFUND) Text(if (original?.refundOf == null) "未关联退款 · 统计时抵减支出" else "已关联原交易", style = MaterialTheme.typography.bodySmall)
+            if (kind == Kind.REFUND) Text(if (original?.refundOf == null) "未关联退款 · 计入收入，不抵减支出" else "已关联原交易", style = MaterialTheme.typography.bodySmall)
             if (original?.timeEstimated == true || event != null) Text("通知时间为接收时间，请按实际交易核对。", style = MaterialTheme.typography.bodySmall)
             original?.orderId?.let { Text("平台交易号：$it", style = MaterialTheme.typography.bodySmall) }
             if (sources.isNotEmpty()) Text("来源：\n" + sources.joinToString("\n") { it.label }, style = MaterialTheme.typography.bodySmall)

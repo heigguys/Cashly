@@ -118,7 +118,7 @@ object Backups {
     suspend fun restore(repo: Repository, backup: Backup) {
         repo.db.withTransaction {
             repo.dao.clearSources(); repo.dao.clearEntries(); repo.dao.clearEvents(); repo.dao.clearCategories(); repo.dao.clearSlots()
-            backup.categories.forEach { repo.dao.category(it) }; backup.entries.forEach { repo.dao.insert(it) }
+            backup.categories.forEach { repo.dao.category(it) }; backup.entries.forEach { repo.dao.insert(it.copy(note = refundNote(it.kind, it.note))) }
             backup.sources.forEach { repo.dao.source(it) }; backup.events.forEach { repo.dao.event(it) }
             backup.slots.forEach { repo.dao.slot(it) }
         }

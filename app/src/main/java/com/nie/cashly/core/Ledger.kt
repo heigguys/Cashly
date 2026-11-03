@@ -6,8 +6,15 @@ import java.security.MessageDigest
 import java.time.*
 import java.time.format.DateTimeFormatter
 
-enum class Kind(val label: String) { EXPENSE("支出"), INCOME("收入"), REFUND("退款"), TRANSFER("内部转账") }
+enum class Kind(val label: String) { EXPENSE("支出"), INCOME("收入"), REFUND("退款收入"), TRANSFER("内部转账");
+    val isIncome get() = this == INCOME || this == REFUND
+}
 val defaultCategories = listOf("餐饮", "交通", "购物", "住房", "娱乐", "医疗", "学习", "工资", "奖金", "其他")
+fun refundNote(kind: Kind, note: String): String = when {
+    kind != Kind.REFUND || note.contains("退款") -> note
+    note.isBlank() -> "退款"
+    else -> "退款 · $note"
+}
 fun cents(text: String): Long {
     val input = text.trim().removePrefix("￥").removePrefix("¥").removeSuffix("元").trim()
     require(Regex("(?:\\d+|\\d{1,3}(?:,\\d{3})+)(\\.\\d{1,2})?").matches(input)) { "请输入正数金额，最多两位小数" }
@@ -32,30 +39,40 @@ fun parseTime(text: String): Long {
 }
 fun formatTime(time: Long): String = Instant.ofEpochMilli(time).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
 data class Totals(val income: Long, val expense: Long) { val balance get() = income - expense }
-fun totals(rows: List<Pair<Kind, Long>>) = Totals(rows.filter { it.first == Kind.INCOME }.sumOf { it.second },
-    rows.sumOf { when(it.first) { Kind.EXPENSE -> it.second; Kind.REFUND -> -it.second; else -> 0L } })
+fun totals(rows: List<Pair<Kind, Long>>) = Totals(rows.filter { it.first.isIncome }.sumOf { it.second },
+    rows.filter { it.first == Kind.EXPENSE }.sumOf { it.second })
 
 data class Parsed(val amount: Long?, val kind: Kind?, val party: String, val order: String?, val evidence: String, val certain: Boolean)
 interface PaymentParser { fun parse(text: String): Parsed? }
 class WeChatParser : PaymentParser { override fun parse(text: String) = parsePayment(text, true) }
 class AlipayParser : PaymentParser { override fun parse(text: String) = parsePayment(text, false) }
+fun parsePaymentNotification(packageName: String, title: String, body: String): Parsed? {
+    val parser = when (packageName) {
+        "com.tencent.mm" -> if (title in listOf("微信支付", "微信收款助手", "微信支付助手")) WeChatParser() else null
+        "com.eg.android.AlipayGphone" -> if (title in listOf("支付宝", "支付成功", "收款到账", "到账提醒", "退款到账", "退款提醒", "退款成功", "交易提醒")) AlipayParser() else null
+        else -> null
+    }
+    return parser?.parse("$title\n$body")
+}
 private fun parsePayment(text: String, wechat: Boolean): Parsed? {
-    if (listOf("交易失败", "支付失败", "待支付", "等待付款", "付款请求", "请付款", "优惠券", "立减", "红包封面").any(text::contains)) return null
+    if (listOf("交易失败", "支付失败", "退款失败", "退款申请", "退款处理中", "退款中", "等待退款", "预计到账", "待支付", "等待付款", "付款请求", "请付款", "优惠券", "立减", "红包封面").any(text::contains)) return null
     // Restrict to transaction-style templates. Ordinary chats are never considered proof of payment.
     val triggers = if (wechat) listOf("微信支付", "收款到账", "微信收款", "支付成功", "转账到账", "退款到账", "转账成功")
-        else listOf("支付宝", "支付成功", "收款到账", "到账提醒", "退款成功", "退款到账", "转账成功")
+        else listOf("支付宝", "支付成功", "收款到账", "到账提醒", "退款成功", "退款到账", "退款提醒", "转账成功")
     if (triggers.none(text::contains)) return null
     val numeric = "(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?"
+    val refundReceived = Regex("(?:你)?收到(?:一笔)?\\s*$numeric\\s*元退款").containsMatchIn(text)
     val amount = Regex("(?:[¥￥]\\s*($numeric)(?![\\d.,])|(?<![\\d.,])($numeric)\\s*元)")
         .findAll(text).mapNotNull { m -> runCatching { cents(m.groupValues[1].ifEmpty { m.groupValues[2] }) }.getOrNull() }.toList()
     val kind = when {
         text.contains("本人账户") && listOf("互转", "转入", "转出").any(text::contains) -> Kind.TRANSFER
-        listOf("退款到账", "退款成功").any(text::contains) -> Kind.REFUND
+        refundReceived || listOf("退款到账", "退款成功", "退款提醒").any(text::contains) -> Kind.REFUND
         listOf("收款到账", "微信收款", "转账到账", "收入", "收到转账").any(text::contains) -> Kind.INCOME
         listOf("支付成功", "付款成功", "支出", "转账成功").any(text::contains) -> Kind.EXPENSE
         else -> null
     }
-    val success = listOf("支付成功", "付款成功", "收款到账", "微信收款", "转账到账", "退款到账", "退款成功", "转账成功").any(text::contains)
+    val success = if (kind == Kind.REFUND) refundReceived || listOf("退款到账", "退款成功").any(text::contains)
+        else listOf("支付成功", "付款成功", "收款到账", "微信收款", "转账到账", "转账成功").any(text::contains)
     val order = Regex("(?:交易号|订单号|商户单号)[：:\\s]+([A-Za-z0-9_-]{6,})").find(text)?.groupValues?.get(1)
     val party = Regex("(?:商户|交易对象|收款方|付款方)[：:]\\s*([^\\n，,]+)").find(text)?.groupValues?.get(1)?.trim().orEmpty()
     val certain = success && amount.size == 1 && kind != null

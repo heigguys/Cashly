@@ -4,8 +4,19 @@ import com.nie.cashly.core.*
 import org.junit.Assert.*
 import org.junit.Test
 
-/** All notification and bill examples in these tests are SYNTHETIC, not real app samples. */
+/** Fixtures are synthetic except the refund wording transcribed from the user's screenshot. */
 class LedgerTest {
+    @Test fun refundNotesPreserveUserTextAndAreIdempotent() {
+        assertEquals("退款", refundNote(Kind.REFUND, ""))
+        assertEquals("退款", refundNote(Kind.REFUND, "  "))
+        assertEquals("退款 · 退货差价", refundNote(Kind.REFUND, "退货差价"))
+        assertEquals("部分退款", refundNote(Kind.REFUND, "部分退款"))
+        val once = refundNote(Kind.REFUND, "原始备注")
+        assertEquals(once, refundNote(Kind.REFUND, once))
+        assertEquals("工资", refundNote(Kind.INCOME, "工资"))
+        assertEquals("", refundNote(Kind.INCOME, ""))
+        assertEquals("餐费", refundNote(Kind.EXPENSE, "餐费"))
+    }
     @Test fun exactMoney() {
         assertEquals(123456L, cents("¥1,234.56")); assertEquals("0.01", money(1))
         listOf("0", "-1", "0.001", "1e5", "abc", "1,23", "999999999999999999999").forEach { assertTrue(runCatching { cents(it) }.isFailure) }
@@ -30,7 +41,25 @@ class LedgerTest {
     }
     @Test fun refundsAndTransfers() {
         val t = totals(listOf(Kind.INCOME to 10000L, Kind.EXPENSE to 5000L, Kind.REFUND to 1000L, Kind.TRANSFER to 90000L))
-        assertEquals(10000L, t.income); assertEquals(4000L, t.expense); assertEquals(6000L, t.balance)
+        assertEquals(11000L, t.income); assertEquals(5000L, t.expense); assertEquals(6000L, t.balance)
+    }
+    @Test fun alipayRefundReminderFromUserScreenshot() {
+        val parsed = parsePaymentNotification("com.eg.android.AlipayGphone", "退款提醒", "你收到一笔26.80元退款，点此查看账单详情！")!!
+        assertTrue(parsed.certain); assertEquals(2680L, parsed.amount); assertEquals(Kind.REFUND, parsed.kind)
+        val total = totals(listOf(parsed.kind!! to parsed.amount!!))
+        assertEquals(2680L, total.income); assertEquals(0L, total.expense)
+        assertTrue(parsed.kind.isIncome)
+        assertTrue(parsePaymentNotification("com.eg.android.AlipayGphone", "支付宝", "你收到一笔26.80元退款，点此查看账单详情！")!!.certain)
+        assertTrue(parsePaymentNotification("com.tencent.mm", "微信支付", "退款到账 26.80元")!!.certain)
+    }
+    @Test fun refundReminderNeedsConfirmedArrivalAndUnambiguousAmount() {
+        assertFalse(parsePaymentNotification("com.eg.android.AlipayGphone", "退款提醒", "你收到一笔退款，金额已隐藏")!!.certain)
+        assertFalse(parsePaymentNotification("com.eg.android.AlipayGphone", "退款提醒", "26.80元退款详情")!!.certain)
+        assertFalse(parsePaymentNotification("com.eg.android.AlipayGphone", "退款提醒", "你收到一笔26.80元退款，余额100.00元")!!.certain)
+        assertNull(parsePaymentNotification("com.eg.android.AlipayGphone", "退款提醒", "退款处理中，预计到账26.80元"))
+        assertNull(parsePaymentNotification("com.eg.android.AlipayGphone", "退款提醒", "退款失败26.80元"))
+        assertNull(parsePaymentNotification("com.tencent.mm", "朋友", "你收到一笔26.80元退款，点此查看账单详情！"))
+        assertNull(parsePaymentNotification("com.tencent.mobileqq", "退款提醒", "你收到一笔26.80元退款，点此查看账单详情！"))
     }
     @Test fun csvQuotedFieldsAndEncodingMarkers() {
         assertEquals(listOf(listOf("a,b", "a\"b", "c\nd")), Csv.read("\"a,b\",\"a\"\"b\",\"c\nd\""))

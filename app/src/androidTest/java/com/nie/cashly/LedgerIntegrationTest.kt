@@ -20,6 +20,44 @@ class LedgerIntegrationTest {
         repo = Repository(context, db); repo.init()
     }
     @After fun close() { db.close() }
+    @Test fun refundReminderIsRecordedOnceAndCountsAsIncome() = runBlocking {
+        val body = "你收到一笔26.80元退款，点此查看账单详情！"
+        val parsed = parsePaymentNotification("com.eg.android.AlipayGphone", "退款提醒", body)
+        val time = System.currentTimeMillis()
+        repeat(2) { repo.captureNotification("refund-screenshot", "支付宝", body, time, parsed) }
+        val entry = repo.dao.entries().single()
+        assertEquals(2680L, entry.amount); assertEquals(Kind.REFUND, entry.kind); assertEquals("退款", entry.note)
+        assertFalse(repo.dao.events().single().pending)
+        val total = totals(repo.dao.entries().map { it.kind to it.amount })
+        assertEquals(2680L, total.income); assertEquals(0L, total.expense)
+        // Old stored refunds and restored backups use the same new accounting rule, without rewriting IDs.
+        val backup = Backups.decode(Backups.encode(repo, "系统")); Backups.restore(repo, backup)
+        repo.captureNotification("refund-screenshot", "支付宝", body, time, parsed)
+        assertEquals(entry.id, repo.dao.entries().single().id)
+        assertEquals(2680L, totals(repo.dao.entries().map { it.kind to it.amount }).income)
+        assertEquals("退款", repo.dao.entries().single().note)
+    }
+    @Test fun refundNotesForImportManualEditAndOlderRecords() = runBlocking {
+        val row = ImportRow("支付宝", 2680, Kind.REFUND, System.currentTimeMillis(), "合成商户", "退货差价", "REFUND001", "bill:refund-note")
+        repo.commit(repo.preview(listOf(row)), emptyMap())
+        val imported = repo.dao.entries().single()
+        assertEquals("退款 · 退货差价", imported.note)
+        repo.save(imported.copy(note = "补充说明"), true)
+        assertEquals("退款 · 补充说明", repo.dao.entries().single().note)
+        repo.commit(repo.preview(listOf(row)), emptyMap())
+        assertEquals("退款 · 补充说明", repo.dao.entries().single().note)
+        // Simulate records written by older versions, then restart initialization twice.
+        repo.dao.update(imported.copy(note = "旧备注"))
+        repo.init(); repo.init()
+        assertEquals("退款 · 旧备注", repo.dao.entries().single().note)
+        val oldBackup = Backups.decode(Backups.encode(repo, "系统")).let { it.copy(entries = it.entries.map { entry -> entry.copy(note = "备份备注") }) }
+        Backups.restore(repo, oldBackup)
+        assertEquals("退款 · 备份备注", repo.dao.entries().single().note)
+        assertEquals(imported.id, repo.dao.entries().single().id)
+        val income = Entry(amount = 100, kind = Kind.INCOME, platform = "现金", time = System.currentTimeMillis(), note = "工资")
+        repo.save(income, false)
+        assertEquals("工资", repo.dao.entries().find { it.id == income.id }!!.note)
+    }
     @Test fun notificationReplayAndSeparatePayments() = runBlocking {
         val parsed = AlipayParser().parse("支付宝 支付成功 ¥12.34")
         repo.capture("notification:a", "支付宝", "synthetic", System.currentTimeMillis(), parsed)
